@@ -39,7 +39,7 @@
     "mocha-lcov-reporter": "^1.2.0",
     "nodejs-websocket": "^1.7.1",
     "opts": "^1.2.2",
-    "webpack": "^2.2.0"
+    "webpack": "^2.7.0"
   },
   "repository": {
     "type": "git",
