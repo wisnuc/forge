@@ -1,3 +1,7 @@
+const fs = require('fs')
+const child = require('child_process')
+const crypto = require('crypto')
+
 const HandshakeMessage = (type, message) =>
   Buffer.concat([
     Buffer.from([
@@ -71,9 +75,11 @@ const handleServerHello = message => {
   let body = message.slice(4)
 
   if (length !== body.length) throw new Error('invalid message body length')
-  if (body.readUInt16BE(0) !== 0x0303) throw new Error('unsupported tls version')
 
+  let version = body.readUInt16BE(0)
   body = body.slice(2) 
+
+  if (version !== 0x0303) throw new Error('unsupported tls version')
 
   let random = body.slice(0, 32)
   body = body.slice(32)
@@ -98,7 +104,57 @@ const handleServerHello = message => {
   return { random, sessionId }
 }
 
+const handleServerCertificate = message => {
+  if (message.length < 4) throw new Error('invalid message length')
+  if (message[0] !== 0x0b) throw new Error('not a cerificate message')
+
+  let length = message.readUInt32BE(0) & 0x00ffffff  
+  let body = message.slice(4)
+  if (length !== body.length) throw new Error('invalid message body length')
+ 
+  let certsLength = body[0] * 65536 + body[1] * 256 + body[2]  
+  // drop everything after certs
+  body = body.slice(3, 3 + certsLength)
+
+  let certs = [] 
+  while (body.length) {
+    // TODO validate body.length and certLen
+    let certLen = body[0] * 65536 + body[1] * 256 + body[2]
+    certs.push(body.slice(3, 3 + certLen))
+    body = body.slice(3 + certLen)
+  }
+
+  let input = certs[0]
+  let publicKey = child.execSync('openssl x509 -inform der -noout -pubkey', { input })
+  return { publicKey, certs }
+}
+
+const handleCertificateRequest = message => {
+  if (message.length < 4) throw new Error('invalid message length')
+  if (message[0] !== 0x0d) throw new Error('not a cerificate request message')
+
+  let length = message.readUInt32BE(0) & 0x00ffffff  
+  let body = message.slice(4)
+  if (length !== body.length) throw new Error('invalid message body length')
+
+  console.log('   do nothing') 
+}
+
+const handleServerHelloDone = message => {
+  if (message.length < 4) throw new Error('invalid message length')
+  if (message[0] !== 0x0e) throw new Error('not a server hello done message')
+
+  let length = message.readUInt32BE(0) & 0x00ffffff  
+  let body = message.slice(4)
+  if (length !== body.length) throw new Error('invalid message body length')
+
+  console.log('   do nothing')
+}
+
 module.exports = {
   ClientHello,
   handleServerHello,
+  handleServerCertificate,
+  handleCertificateRequest,
+  handleServerHelloDone,
 }
