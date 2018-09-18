@@ -50,11 +50,6 @@ var client = forge.tls.createConnection({
   tlsDataReady: function (connection) {
     // encrypted data is ready to be sent to the server
     var data = connection.tlsData.getBytes()
-
-    console.log('data length', data.length)
-
-//    print(data)
-
     socket.write(data, 'binary') // encoding should be 'binary'
   },
   dataReady: function (connection) {
