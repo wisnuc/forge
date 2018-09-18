@@ -2,6 +2,8 @@ const fs = require('fs')
 const child = require('child_process')
 const crypto = require('crypto')
 
+const PRF = require('./prf')
+
 const HandshakeMessage = (type, message) =>
   Buffer.concat([
     Buffer.from([
@@ -151,10 +153,104 @@ const handleServerHelloDone = message => {
   console.log('   do nothing')
 }
 
+const ClientCertificate = () => {
+  // convert pem crt to der
+  let certString = fs.readFileSync('deviceCert.crt')
+    .toString()
+    .split('\n')
+    .filter(x => !!x && !x.startsWith('--'))
+    .join('')
+
+  let cert = Buffer.from(certString, 'base64')
+  let certLen = Buffer.from([
+    cert.length >> 16,
+    cert.length >> 8,
+    cert.length
+  ])
+
+  let certsLen = Buffer.from([
+    (cert.length + 3) >> 16,
+    (cert.length + 3) >> 8,
+    (cert.length + 3)
+  ])
+
+  let payload = Buffer.concat([certsLen, certLen, cert])
+  return HandshakeMessage(0x0b, payload)
+}
+
+const ClientKeyExchange = (publicKey, preMasterSecret) => {
+
+/**
+    preMasterSecret = Buffer.alloc(48)
+    crypto.randomFillSync(preMasterSecret, 48)
+    preMasterSecret[0] = 0x03
+    preMasterSecret[1] = 0x03
+*/
+
+  let encrypted = crypto.publicEncrypt(publicKey, preMasterSecret)
+  let len16 = Buffer.from([encrypted.length >> 8, encrypted.length])
+  let payload = Buffer.concat([len16, encrypted])
+  return HandshakeMessage(0x10, payload)
+}
+
+const CertificateVerify = tbs => {
+  let sigAlgorithm = Buffer.from([0x04, 0x01])
+  let sigLength = Buffer.from([0x00, 0x00])
+  let privateKey = fs.readFileSync('deviceCert.key')
+  let sign = crypto.createSign('sha256')
+  sign.update(tbs)
+  let sig = sign.sign(privateKey)
+  sigLength.writeUInt16BE(sig.length)
+  return HandshakeMessage(0x0f, Buffer.concat([sigAlgorithm, sigLength, sig]))
+}
+
+const ChangeCipherSpecMessage = () =>
+  Buffer.from([
+    0x14, // type
+    0x03, 0x03, // version
+    0x00, 0x01, // length
+    0x01 // content
+  ])
+
+const deriveKeys = (preMasterSecret, clientRandom, serverRandom) => {
+  let random
+
+  // when generating master secret, client random first
+  random = Buffer.concat([clientRandom, serverRandom])
+  masterSecret = PRF(preMasterSecret, 'master secret', random, 48, 'sha256')
+
+  // when extracting keys, server random first
+  random = Buffer.concat([serverRandom, clientRandom])
+  let keys = PRF(masterSecret, 'key expansion', random, 2 * (20 + 16), 'sha256')
+
+  return {
+    masterSecret,
+    clientWriteMacKey: keys.slice(0, 20),
+    serverWriteMacKey: keys.slice(20, 40),
+    clientWriteKey: keys.slice(40, 56),
+    serverWriteKey:keys.slice(56, 72),
+  }
+}
+
+const ClientFinished = (masterSecret, handshakeMessages) => {
+  let verifyData = PRF( masterSecret, 'client finished',
+    crypto.createHash('sha256').update(handshakeMessages).digest(),
+    12, 'sha256')
+  
+  return HandshakeMessage(0x14, verifyData)
+}
+
+
+
 module.exports = {
   ClientHello,
   handleServerHello,
   handleServerCertificate,
   handleCertificateRequest,
   handleServerHelloDone,
+  ClientCertificate,
+  ClientKeyExchange,
+  CertificateVerify,
+  ClientFinished,
+  deriveKeys
 }
