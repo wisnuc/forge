@@ -179,7 +179,6 @@ const ClientCertificate = () => {
 }
 
 const ClientKeyExchange = (publicKey, preMasterSecret) => {
-
 /**
     preMasterSecret = Buffer.alloc(48)
     crypto.randomFillSync(preMasterSecret, 48)
@@ -240,7 +239,25 @@ const ClientFinished = (masterSecret, handshakeMessages) => {
   return HandshakeMessage(0x14, verifyData)
 }
 
+const Cipher = (msg, macKey, key, iv) => {
+  let hmac = crypto.createHmac('sha1', macKey)
+    .update(Buffer.concat([
+      Buffer.alloc(8), // 64 bit sequence number
+      Buffer.from([0x16, 0x03, 0x03, msg.length >> 8, msg.length]),
+      msg
+    ])) 
+    .digest() 
 
+  let fragment = Buffer.concat([msg, hmac])
+  if (fragment.length % 16) {
+    let padding = 16 - (fragment.length % 16)
+    fragment = Buffer.concat([fragment, Buffer.alloc(padding, padding - 1)])
+  }
+
+  let cipher = crypto.createCipheriv('aes-128-cbc', key, iv)
+  cipher.setAutoPadding(false)
+  return Buffer.concat([iv, cipher.update(fragment), cipher.final()])
+}
 
 module.exports = {
   ClientHello,
@@ -252,5 +269,8 @@ module.exports = {
   ClientKeyExchange,
   CertificateVerify,
   ClientFinished,
-  deriveKeys
+  deriveKeys,
+  Cipher,
 }
+
+
