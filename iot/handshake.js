@@ -1,134 +1,64 @@
 const fs = require('fs')
 const child = require('child_process')
 const crypto = require('crypto')
-
 const PRF = require('./prf')
 
-const HandshakeMessage = (type, message) =>
-  Buffer.concat([
+const K = x => y => x
+const UInt8 = i => Buffer.from([i])
+const UInt16 = i => Buffer.from([i >> 8, i])
+const UInt24 = i => Buffer.from([i >> 16, i >> 8, i])
+const readUInt24 = buf => buf[0] * 65536 + buf[1] * 256 + buf[2]
+
+const Prepend8 = b => Buffer.concat([UInt8(b.length), b])
+const Prepend16 = b => Buffer.concat([UInt16(b.length), b])
+const Prepend24 = b => Buffer.concat([UInt24(b.length), b])
+
+const { RSA_PKCS1_PADDING } = crypto.constants
+
+const TLSVersion = Buffer.from([0x03, 0x03])
+const AES_128_CBC_SHA = Buffer.from([0x00, 0x2f])
+
+const HandshakeMessage = (type, msg) =>
+  Buffer.concat([UInt8(type), UInt24(msg.length), msg])
+
+const ClientHello = random =>
+  HandshakeMessage(1, Buffer.concat([
+    TLSVersion,
+    random,
+    Buffer.from([0]), // session_id
+    Buffer.from([0x00, 0x02, 0x00, 0x2f]), // cipher_suites
+    Buffer.from([0x01, 0x00]), // compression_methods
     Buffer.from([
-      type,
-      (message.length >> 16) & 0xff,
-      (message.length >> 8) & 0xff,
-      message.length & 0xff
-    ]), 
-    message
-  ]) 
-
-const ClientHello = random => {
-
-  // TLS 1.2
-  let client_version = Buffer.from([0x03, 0x03])
-
-  // time + random bytes
-/**
-  clientHelloRandom = Buffer.alloc(32)
-  crypto.randomFillSync(clientHelloRandom)
-  clientHelloRandom.writeUInt32BE(Math.floor(new Date().getTime() / 1000))
-*/
-
-  // session id length = 0
-  let session_id = Buffer.from([0x00])
-
-  /**
-    CipherSuite TLS_RSA_WITH_NULL_MD5                 = { 0x00,0x01 };
-    CipherSuite TLS_RSA_WITH_NULL_SHA                 = { 0x00,0x02 };
-    CipherSuite TLS_RSA_WITH_NULL_SHA256              = { 0x00,0x3B };
-    CipherSuite TLS_RSA_WITH_RC4_128_MD5              = { 0x00,0x04 };
-    CipherSuite TLS_RSA_WITH_RC4_128_SHA              = { 0x00,0x05 };
-    CipherSuite TLS_RSA_WITH_3DES_EDE_CBC_SHA         = { 0x00,0x0A };
-  * CipherSuite TLS_RSA_WITH_AES_128_CBC_SHA          = { 0x00,0x2F };
-    CipherSuite TLS_RSA_WITH_AES_256_CBC_SHA          = { 0x00,0x35 };
-    CipherSuite TLS_RSA_WITH_AES_128_CBC_SHA256       = { 0x00,0x3C };
-    CipherSuite TLS_RSA_WITH_AES_256_CBC_SHA256       = { 0x00,0x3D };
-
-  * mandatory
-  */
-  let cipher_suites = Buffer.from([0x00, 0x04, 0x00, 0x2f, 0x00, 0x35])
-
-  // no compression
-  let compression_methods = Buffer.from([0x01, 0x00])
-  let extensions = Buffer.from([
-    0x00, 0x0a, // Extensions Length: 10
+      0x00, 0x0a, // Extensions Length: 10
       0x00, 0x0d, // type: signature_algorithms
       0x00, 0x06, // length: 6
-        0x00, 0x04, // Signature Hash Algorithms Length: 4 
-          0x04, 0x01, // sha256, rsa
-          0x02, 0x01, // sha1, rsa
-  ])
+      0x00, 0x04, // Signature Hash Algorithms Length: 4
+      0x04, 0x01, // sha256, rsa
+      0x02, 0x01 // sha1, rsa
+    ])
+  ]))
 
-  let payload = Buffer.concat([
-    client_version,
-    random,
-    session_id,
-    cipher_suites,
-    compression_methods,
-    extensions
-  ])
-
-  return HandshakeMessage(0x01, payload)
-}
-
-const handleServerHello = message => {
-  if (message.length < 4) throw new Error('invalid message length')
-  if (message[0] !== 0x02) throw new Error('not a server hello message')
-
-  let length = message.readUInt32BE(0) & 0x00ffffff
-  let body = message.slice(4)
-
-  if (length !== body.length) throw new Error('invalid message body length')
-
-  let version = body.readUInt16BE(0)
-  body = body.slice(2) 
-
-  if (version !== 0x0303) throw new Error('unsupported tls version')
-
-  let random = body.slice(0, 32)
-  body = body.slice(32)
-
-  // TODO is session Id fixed length ? 
-  let sessionIdLength = body[0]
-  body = body.slice(1)
-  
-  let sessionId = body.slice(0, sessionIdLength)
-  body = body.slice(sessionIdLength)
-
-  let cipherSuite = body.readUInt16BE(0)
-  body = body.slice(2)
-  if (cipherSuite !== 0x002f) throw new Error('unsupported cipher suite')
-
-  let compression = body[0]
-  body = body.slice(1)
-  if (compression !== 0) throw new Error('unsupported compression')
-
-  if (body.length !== 0) console.log('WARNING: extra data in server hello message') 
-
+const handleServerHello = msg => {
+  const unshift = size => K(msg.slice(0, size))(msg = msg.slice(size))
+  if (!unshift(2).equals(TLSVersion)) throw new Error('unsupported tls version')
+  let random = unshift(32)
+  let sessionId = unshift(unshift(1)[0])
+  if (!unshift(2).equals(AES_128_CBC_SHA)) throw new Error('unsupported cipher suite')
+  if (unshift(1)[0] !== 0) throw new Error('unsupported compression')
+  if (msg.length !== 0) console.log('WARNING: extra data in server hello message')
   return { random, sessionId }
 }
 
-const handleServerCertificate = (message, save) => {
-  if (message.length < 4) throw new Error('invalid message length')
-  if (message[0] !== 0x0b) throw new Error('not a cerificate message')
+const handleServerCertificate = msg  => {
+  const unshift = size => K(msg.slice(0, size))(msg = msg.slice(size))
+  if (msg.length < 3 || readUInt24(unshift(3)) !== msg.length) 
+    throw new Error('invalid message length')
 
-  let length = message.readUInt32BE(0) & 0x00ffffff  
-  let body = message.slice(4)
-  if (length !== body.length) throw new Error('invalid message body length')
- 
-  let certsLength = body[0] * 65536 + body[1] * 256 + body[2]  
-  // drop everything after certs
-  body = body.slice(3, 3 + certsLength)
-
-  let certs = [] 
-  while (body.length) {
-    // TODO validate body.length and certLen
-    let certLen = body[0] * 65536 + body[1] * 256 + body[2]
-
-    if (save) {
-      fs.writeFileSync(`server_cert_${certs.length}.crt`, body.slice(3, 3 + certLen))
-    }
-
-    certs.push(body.slice(3, 3 + certLen))
-    body = body.slice(3 + certLen)
+  let certs = []
+  while (msg.length) {
+    if (msg.length < 3 || readUInt24(msg) + 3 > msg.length) 
+      throw new Error('invalid cert length')
+    certs.push(unshift(readUInt24(unshift(3))))
   }
 
   let input = certs[0]
@@ -136,199 +66,101 @@ const handleServerCertificate = (message, save) => {
   return { publicKey, certs }
 }
 
-const handleCertificateRequest = message => {
-  if (message.length < 4) throw new Error('invalid message length')
-  if (message[0] !== 0x0d) throw new Error('not a cerificate request message')
+const handleCertificateRequest = msg => {
+  const unshift = size => K(msg.slice(0, size))(msg = msg.slice(size))
 
-  let length = message.readUInt32BE(0) & 0x00ffffff  
-  let body = message.slice(4)
-  if (length !== body.length) throw new Error('invalid message body length')
+  if (msg.length < 1 || msg[0] + 1 > msg.length) throw new Error('invalid length')
+  let certTypes = Array.from(unshift(unshift(1)[0]))  
+  
+  if (msg.length < 2 || msg.readUInt16BE() % 2 || msg.readUInt16BE() + 2 > msg.length) 
+    throw new Error('invalid length')
 
-  console.log('   do nothing') 
+  let sigAlgorithms = Array.from(unshift(unshift(2).readUInt16BE()))
+    .reduce((acc, c, i, arr) => (i % 2) ? [...acc, arr[i - 1] * 256 + c] : acc, [])
+
+  // distinguished names are omitted TODO 
+  return { certTypes, sigAlgorithms }
 }
 
-const handleServerHelloDone = message => {
-  if (message.length < 4) throw new Error('invalid message length')
-  if (message[0] !== 0x0e) throw new Error('not a server hello done message')
-
-  let length = message.readUInt32BE(0) & 0x00ffffff  
-  let body = message.slice(4)
-  if (length !== body.length) throw new Error('invalid message body length')
-
-  console.log('   do nothing')
+const handleServerHelloDone = msg => {
+  if (msg.length) throw new Error('server hello done not empty')
 }
 
-const ClientCertificate = () => {
-  // convert pem crt to der
-  let certString = fs.readFileSync('deviceCert.crt')
-    .toString()
-    .split('\n')
-    .filter(x => !!x && !x.startsWith('--'))
-    .join('')
+const ClientCertificate = certs => HandshakeMessage(0x0b, 
+  Prepend24(Buffer.concat([...certs.map(c => Prepend24(c))])))
 
-  let cert = Buffer.from(certString, 'base64')
-  let certLen = Buffer.from([
-    cert.length >> 16,
-    cert.length >> 8,
-    cert.length
-  ])
+const ClientKeyExchange = (key, preMasterSecret) => HandshakeMessage(0x10, 
+  Prepend16(crypto.publicEncrypt({ key, padding: RSA_PKCS1_PADDING }, preMasterSecret)))
 
-  let certsLen = Buffer.from([
-    (cert.length + 3) >> 16,
-    (cert.length + 3) >> 8,
-    (cert.length + 3)
-  ])
-
-  let payload = Buffer.concat([certsLen, certLen, cert])
-  return HandshakeMessage(0x0b, payload)
-}
-
-const ClientKeyExchange = (publicKey, preMasterSecret) => {
-
-/**
-    preMasterSecret = Buffer.alloc(48)
-    crypto.randomFillSync(preMasterSecret, 48)
-    preMasterSecret[0] = 0x03
-    preMasterSecret[1] = 0x03
-*/
-  const {
-    RSA_NO_PADDING, 
-    RSA_PKCS1_PADDING, 
-    RSA_PKCS1_OAEP_PADDING
-  } = crypto.constants
-
-  publicKey = {
-    key: publicKey,
-    padding: RSA_PKCS1_PADDING  // !! important !!
-  }
-
-  let encrypted = crypto.publicEncrypt(publicKey, preMasterSecret)
-  let len16 = Buffer.from([encrypted.length >> 8, encrypted.length])
-  let payload = Buffer.concat([len16, encrypted])
-  return HandshakeMessage(0x10, payload)
-}
-
-const CertificateVerify = tbs => {
-  let sigAlgorithm = Buffer.from([0x04, 0x01])
-  let sigLength = Buffer.from([0x00, 0x00])
-  let privateKey = fs.readFileSync('deviceCert.key')
-  let sign = crypto.createSign('sha256')
-  sign.update(tbs)
-  let sig = sign.sign(privateKey)
-  sigLength.writeUInt16BE(sig.length)
-  return HandshakeMessage(0x0f, Buffer.concat([sigAlgorithm, sigLength, sig]))
-}
-
-const ChangeCipherSpecMessage = () =>
-  Buffer.from([
-    0x14, // type
-    0x03, 0x03, // version
-    0x00, 0x01, // length
-    0x01 // content
-  ])
+const CertificateVerify = (key, tbs) => HandshakeMessage(0x0f, 
+  Buffer.concat([Buffer.from([0x04, 0x01]), // algorithm
+    Prepend16(crypto.createSign('sha256').update(tbs).sign(key)) ]))
 
 // when generating master secret, client random first
 // when deriving keys, server random first
 const deriveKeys = (preMasterSecret, clientRandom, serverRandom) => {
-  let random
-  random = Buffer.concat([clientRandom, serverRandom])
+  let random = Buffer.concat([clientRandom, serverRandom])
   masterSecret = PRF(preMasterSecret, 'master secret', random, 48, 'sha256')
   random = Buffer.concat([serverRandom, clientRandom])
   let keys = PRF(masterSecret, 'key expansion', random, 2 * (20 + 16), 'sha256')
-
   return {
     masterSecret,
     clientWriteMacKey: keys.slice(0, 20),
     serverWriteMacKey: keys.slice(20, 40),
     clientWriteKey: keys.slice(40, 56),
-    serverWriteKey:keys.slice(56, 72),
+    serverWriteKey: keys.slice(56, 72)
   }
 }
 
-const ClientFinished = (masterSecret, handshakeMessages) => {
-  let verifyData = PRF(
-    masterSecret, 
-    'client finished',
-    crypto.createHash('sha256').update(handshakeMessages).digest(),
-    12, 'sha256')
-  
-  return HandshakeMessage(0x14, verifyData)
-}
+const ClientFinished = (masterSecret, digest) => 
+  HandshakeMessage(0x14, PRF(masterSecret, 'client finished', digest, 12, 'sha256'))
 
 const Cipher = (plain, macKey, key, iv) => {
-  let hmac = crypto.createHmac('sha1', macKey)
-    .update(Buffer.concat([
-      Buffer.alloc(8), // 64 bit sequence number
-      Buffer.from([0x16, 0x03, 0x03, plain.length >> 8, plain.length]),
-      plain
-    ])) 
-    .digest() 
+  let sn = Buffer.alloc(8)
+  let mac = crypto.createHmac('sha1', macKey)
+    .update(Buffer.concat([sn, UInt8(22), TLSVersion, UInt16(plain.length), plain]))
+    .digest()
 
-  // according to spec, padding length is a must-have
-  let fragment = Buffer.concat([plain, hmac])
-  if (fragment.length % 16) {
-    let padding = 16 - (fragment.length % 16)
-    fragment = Buffer.concat([fragment, Buffer.alloc(padding, padding - 1)])
-  } else {
-    fragment = Buffer.concat([fragment, Buffer.alloc(16, 15)])
-  }
-
-  let cipher = crypto.createCipheriv('aes-128-cbc', key, iv)
-  cipher.setAutoPadding(false)
+  let padding = 16 - ((plain.length + mac.length) % 16)
+  let fragment = Buffer.concat([plain, mac, Buffer.alloc(padding, padding - 1)])
+  let cipher = crypto.createCipheriv('aes-128-cbc', key, iv).setAutoPadding(false)
   return Buffer.concat([iv, cipher.update(fragment), cipher.final()])
 }
 
 const Decipher = (encrypted, macKey, key, sn) => {
-  let iv = encrypted.slice(0, 16)
-  encrypted = encrypted.slice(16)
-
-  let decipher = crypto.createDecipheriv('aes-128-cbc', key, iv)
-  decipher.setAutoPadding(false)
-  let decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
+  // decipher
+  let decipher = crypto
+    .createDecipheriv('aes-128-cbc', key, encrypted.slice(0, 16))
+    .setAutoPadding(false)
+  let padded = Buffer.concat([decipher.update(encrypted.slice(16)), decipher.final()])
 
   // unpad
-  let padVal = decrypted[decrypted.length - 1]
-  let padNum = padVal + 1
-  if (decrypted.length < padNum) throw new Error('invalid padding')
-  
-  for (let i = decrypted.length - padNum; i < decrypted.length; i++) {
-    if (decrypted[i] !== padVal) throw new Error('invalid padding')
-  }
+  let padNum = padded[padded.length - 1] + 1
+  if (padded.length < padNum) throw new Error('invalid padding')
+  if (!padded.slice(padded.length - padNum).equals(Buffer.alloc(padNum, padNum - 1)))
+    throw new Error('invalid padding')
 
-  decrypted = decrypted.slice(0, decrypted.length - padNum)
-
-  // mac length is 20
-  let smac = decrypted.slice(decrypted.length - 20)
-  decrypted = decrypted.slice(0, decrypted.length - 20)
-
+  // dec + mac + pad = padded
+  let dec = padded.slice(0, padded.length - padNum - 20)
+  let smac = padded.slice(padded.length - padNum - 20, padded.length - padNum)
   let cmac = crypto.createHmac('sha1', macKey)
-    .update(Buffer.concat([
-      sn,
-      Buffer.from([0x16, 0x03, 0x03, decrypted.length >> 8, decrypted.length]),
-      decrypted
-    ]))
+    .update(Buffer.concat([sn, UInt8(22), TLSVersion, UInt16(dec.length), dec]))
     .digest()
 
+  // compare mac
   if (!smac.equals(cmac)) throw new Error('mac mismatch')
-
-  return decrypted 
+  return dec
 }
 
-const handleServerFinished = (msg, masterSecret, tbs) => {
+const handleServerFinished = (msg, masterSecret, digest) => {
   if (msg.length < 4) throw new Error('invalid message length')
   if (msg[0] !== 20) throw new Error('not a finished message')
 
-  let length = msg.readUInt32BE(0) & 0x00ffffff  
+  let length = msg.readUInt32BE(0) & 0x00ffffff
   let body = msg.slice(4)
   if (length !== body.length) throw new Error('invalid message body length')
   if (length !== 12) throw new Error('verify data length mismatch')
-
-  let verifyData = PRF(
-    masterSecret, 
-    'server finished',
-    crypto.createHash('sha256').update(tbs).digest(),
-    12, 'sha256')
-
+  let verifyData = PRF(masterSecret, 'server finished', digest, 12, 'sha256')
   if (!verifyData.equals(body)) throw new Error('verify data mismatch')
 }
 
@@ -347,5 +179,3 @@ module.exports = {
   Decipher,
   handleServerFinished
 }
-
-

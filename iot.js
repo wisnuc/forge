@@ -1,3 +1,4 @@
+const fs = require('fs')
 const net = require('net')
 const crypto = require('crypto')
 
@@ -19,12 +20,6 @@ const {
 } = require('./iot/handshake')
 
 /**
-const sliceMessage = (record, length) =>
-  Buffer.from(record.fragment.data, 'binary')
-    .slice(record.fragment.read - 4, record.fragment.read + length)
-*/
-
-/*
    enum {
        hello_request(0), client_hello(1), server_hello(2),
        certificate(11), server_key_exchange (12),
@@ -67,10 +62,11 @@ let ServerWriteMacKey
 let ClientWriteKey
 let ServerWriteKey
 
+
 let IncomingData = Buffer.alloc(0)
 
 const TLSRecord = (type, packet) => Buffer.concat([
-  Buffer.from([ type,
+  Buffer.from([type,
     0x03, 0x03, // TLS 1.2
     (packet.length >> 8) & 0xff,
     packet.length & 0xff
@@ -93,25 +89,6 @@ client.on('data', data => {
   IncomingData = Buffer.concat([IncomingData, data])
 
   while (IncomingData.length >= 5) {
-    /*
-    struct {
-        uint8 major;
-        uint8 minor;
-    } ProtocolVersion;
-
-    enum {
-        change_cipher_spec(20), alert(21), handshake(22),
-        application_data(23), (255)
-    } ContentType;
-
-    struct {
-        ContentType type;
-        ProtocolVersion version;
-        uint16 length;
-        opaque fragment[TLSPlaintext.length];
-    } TLSPlaintext;
-    */
-
     let validTypes = [20, 21, 22, 23]
     let type = IncomingData[0]
     if (!validTypes.includes(type)) throw new Error('invalid tls record type')
@@ -138,7 +115,11 @@ client.on('data', data => {
 
         if (Encryption) {
           let msg = Decipher(fragment, ServerWriteMacKey, ServerWriteKey, ServerSeqNum)
-          handleServerFinished(msg, MasterSecret, Buffer.concat(HandshakeMessages))
+          let digest = crypto.createHash('sha256')
+            .update(Buffer.concat(HandshakeMessages)) 
+            .digest()
+
+          handleServerFinished(msg, MasterSecret, digest)
           console.log('handshake finished')
           return
         }
@@ -161,14 +142,14 @@ client.on('data', data => {
 
             case 2: { // server hello
               console.log('-- handle server hello')
-              let r = handleServerHello(message)
+              let r = handleServerHello(message.slice(4))
               ServerRandom = r.random
               SessionId = r.sessionId
               break
             }
 
             case 11: { // certificate
-              let r = handleServerCertificate(message, true)
+              let r = handleServerCertificate(message.slice(4))
               ServerPublicKey = r.publicKey  
               ServerCertificates = r.certs
               break
@@ -180,18 +161,26 @@ client.on('data', data => {
 
             case 13: { // certificate request
               console.log('-- handle certificate request')
-              handleCertificateRequest(message)
+              let r = handleCertificateRequest(message.slice(4))
+              console.log(r)
               break
             }
 
-            case 14: {
+            case 14: { // server hello done
               console.log('-- handle server hello done')
-              handleServerHelloDone(message)
+              handleServerHelloDone(message.slice(4))
 
-              let msg, tbs, r
+              let msg, tbs, digest, key, r
 
               // client certificate
-              msg = ClientCertificate()
+              let cert = Buffer.from(
+                fs.readFileSync('deviceCert.crt')
+                  .toString()
+                  .split('\n')
+                  .filter(x => !!x && !x.startsWith('--'))
+                  .join(''), 'base64')
+
+              msg = ClientCertificate([cert])
               HandshakeMessages.push(msg)
               client.write(TLSRecord(0x16, msg))
 
@@ -207,7 +196,8 @@ client.on('data', data => {
 
               // client verify
               tbs = Buffer.concat(HandshakeMessages)
-              msg = CertificateVerify(tbs) 
+              key = fs.readFileSync('deviceCert.key')
+              msg = CertificateVerify(key, tbs) 
               HandshakeMessages.push(msg)
               client.write(TLSRecord(0x16, msg))
               
@@ -226,7 +216,8 @@ client.on('data', data => {
 
               // client finished
               tbs = Buffer.concat(HandshakeMessages)
-              msg = ClientFinished(MasterSecret, tbs)
+              digest = crypto.createHash('sha256').update(tbs).digest()
+              msg = ClientFinished(MasterSecret, digest)
               HandshakeMessages.push(msg)
 
               let iv = Buffer.alloc(16)
@@ -257,4 +248,3 @@ client.on('close', () => {
 })
 
 client.connect(8883, 'a3dc7azfqxif0n.iot.cn-north-1.amazonaws.com.cn')
-// client.connect(8883, 'localhost')
