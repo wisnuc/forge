@@ -13,7 +13,9 @@ const {
   CertificateVerify,
   ClientFinished,
   deriveKeys,
-  Cipher
+  Cipher,
+  Decipher,
+  handleServerFinished
 } = require('./iot/handshake')
 
 /**
@@ -51,6 +53,8 @@ const sliceMessage = (record, length) =>
 */
 
 let HandshakeMessages = []
+let ClientSeqNum = Buffer.alloc(8)
+let ServerSeqNum = Buffer.alloc(8)
 let ClientRandom = Buffer.alloc(32)
 let ServerRandom
 let SessionId
@@ -73,6 +77,8 @@ const TLSRecord = (type, packet) => Buffer.concat([
   ]),
   packet
 ])
+
+let Encryption = false
 
 let client = new net.Socket()
 
@@ -104,7 +110,6 @@ client.on('data', data => {
         uint16 length;
         opaque fragment[TLSPlaintext.length];
     } TLSPlaintext;
-
     */
 
     let validTypes = [20, 21, 22, 23]
@@ -119,22 +124,30 @@ client.on('data', data => {
 
     switch (type) {
       case 20: { // change_cipher_spec
+        console.log('server change cipher spec')
         break
       }
 
       case 21: { // alert
+        console.log('server alert')
+        console.log(fragment.length, fragment)
         break
       }
 
       case 22: { // handshake
+
+        if (Encryption) {
+          let msg = Decipher(fragment, ServerWriteMacKey, ServerWriteKey, ServerSeqNum)
+          handleServerFinished(msg, MasterSecret, Buffer.concat(HandshakeMessages))
+          console.log('handshake finished')
+          return
+        }
+
         // hello_request not inclueded
         let bufferedTypes = [1, 2, 11, 12,13, 14, 15, 16, 20]
         let validTypes = [0, ...bufferedTypes]
 
         while (fragment.length) {
-
-          console.log('while fragment.length', fragment.length)
-
           if (fragment.length < 4) throw new Error('invalid fragment length')
 
           let type = fragment[0]
@@ -145,6 +158,7 @@ client.on('data', data => {
           if (bufferedTypes.includes(type)) HandshakeMessages.push(message) 
 
           switch (type) {
+
             case 2: { // server hello
               console.log('-- handle server hello')
               let r = handleServerHello(message)
@@ -154,7 +168,7 @@ client.on('data', data => {
             }
 
             case 11: { // certificate
-              let r = handleServerCertificate(message)
+              let r = handleServerCertificate(message, true)
               ServerPublicKey = r.publicKey  
               ServerCertificates = r.certs
               break
@@ -184,6 +198,9 @@ client.on('data', data => {
               // client key exchange
               PreMasterSecret = Buffer.alloc(48)
               crypto.randomFillSync(PreMasterSecret)
+              PreMasterSecret[0] = 0x03
+              PreMasterSecret[1] = 0x03
+
               msg = ClientKeyExchange(ServerPublicKey, PreMasterSecret)
               HandshakeMessages.push(msg)
               client.write(TLSRecord(0x16, msg))
@@ -196,6 +213,9 @@ client.on('data', data => {
               
               // change ciper spec 
               client.write(TLSRecord(0x14, Buffer.from([0x01])))
+
+              // turn on Encryption
+              Encryption = true
 
               r = deriveKeys(PreMasterSecret, ClientRandom, ServerRandom) 
               MasterSecret = r.masterSecret
@@ -237,3 +257,4 @@ client.on('close', () => {
 })
 
 client.connect(8883, 'a3dc7azfqxif0n.iot.cn-north-1.amazonaws.com.cn')
+// client.connect(8883, 'localhost')

@@ -4,12 +4,11 @@ const net = require('net')
 
 // forge.options.usePureJavaScript = true
 var socket = new net.Socket()
+
 console.log(forge.tls.Version)
 
 const print = data => {
   let buffer = Buffer.from(data, 'binary')
-
-  console.log(buffer.length)
 
   while (buffer.length > 32) {
     console.log(buffer.slice(0, 32))
@@ -20,6 +19,10 @@ const print = data => {
   if (buffer.length)
     console.log(buffer)
 }
+
+let i = 0
+
+let dump = Buffer.alloc(0)
 
 var client = forge.tls.createConnection({
   server: false,
@@ -40,18 +43,22 @@ var client = forge.tls.createConnection({
   getCertificate: (connection, hint) => {
     return fs.readFileSync('deviceCert.crt').toString()
   },
+
   connected: function (connection) {
+    fs.writeFileSync('socket.dump', dump)
     console.log('[tls] connected')
-    // prepare some data to send (note that the string is interpreted as
-    // 'binary' encoded, which works for HTTP which only uses ASCII, use
-    // forge.util.encodeUtf8(str) otherwise
-    // client.prepare('GET / HTTP/2.0\r\n\r\n')
   },
+
   tlsDataReady: function (connection) {
     // encrypted data is ready to be sent to the server
     var data = connection.tlsData.getBytes()
-    socket.write(data, 'binary') // encoding should be 'binary'
+    var buf = Buffer.from(data, 'binary')
+
+    dump = Buffer.concat([dump, buf]) 
+
+    socket.write(buf) // encoding should be 'binary'
   },
+
   dataReady: function (connection) {
     // clear data from the server is ready
     var data = connection.data.getBytes()

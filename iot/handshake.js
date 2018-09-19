@@ -106,7 +106,7 @@ const handleServerHello = message => {
   return { random, sessionId }
 }
 
-const handleServerCertificate = message => {
+const handleServerCertificate = (message, save) => {
   if (message.length < 4) throw new Error('invalid message length')
   if (message[0] !== 0x0b) throw new Error('not a cerificate message')
 
@@ -122,6 +122,11 @@ const handleServerCertificate = message => {
   while (body.length) {
     // TODO validate body.length and certLen
     let certLen = body[0] * 65536 + body[1] * 256 + body[2]
+
+    if (save) {
+      fs.writeFileSync(`server_cert_${certs.length}.crt`, body.slice(3, 3 + certLen))
+    }
+
     certs.push(body.slice(3, 3 + certLen))
     body = body.slice(3 + certLen)
   }
@@ -186,6 +191,16 @@ const ClientKeyExchange = (publicKey, preMasterSecret) => {
     preMasterSecret[0] = 0x03
     preMasterSecret[1] = 0x03
 */
+  const {
+    RSA_NO_PADDING, 
+    RSA_PKCS1_PADDING, 
+    RSA_PKCS1_OAEP_PADDING
+  } = crypto.constants
+
+  publicKey = {
+    key: publicKey,
+    padding: RSA_PKCS1_PADDING  // !! important !!
+  }
 
   let encrypted = crypto.publicEncrypt(publicKey, preMasterSecret)
   let len16 = Buffer.from([encrypted.length >> 8, encrypted.length])
@@ -212,12 +227,12 @@ const ChangeCipherSpecMessage = () =>
     0x01 // content
   ])
 
+// when generating master secret, client random first
+// when deriving keys, server random first
 const deriveKeys = (preMasterSecret, clientRandom, serverRandom) => {
   let random
-  // when generating master secret, client random first
   random = Buffer.concat([clientRandom, serverRandom])
   masterSecret = PRF(preMasterSecret, 'master secret', random, 48, 'sha256')
-  // when extracting keys, server random first
   random = Buffer.concat([serverRandom, clientRandom])
   let keys = PRF(masterSecret, 'key expansion', random, 2 * (20 + 16), 'sha256')
 
@@ -240,24 +255,81 @@ const ClientFinished = (masterSecret, handshakeMessages) => {
   return HandshakeMessage(0x14, verifyData)
 }
 
-const Cipher = (msg, macKey, key, iv) => {
+const Cipher = (plain, macKey, key, iv) => {
   let hmac = crypto.createHmac('sha1', macKey)
     .update(Buffer.concat([
       Buffer.alloc(8), // 64 bit sequence number
-      Buffer.from([0x16, 0x03, 0x03, msg.length >> 8, msg.length]),
-      msg
+      Buffer.from([0x16, 0x03, 0x03, plain.length >> 8, plain.length]),
+      plain
     ])) 
     .digest() 
 
-  let fragment = Buffer.concat([msg, hmac])
+  // according to spec, padding length is a must-have
+  let fragment = Buffer.concat([plain, hmac])
   if (fragment.length % 16) {
     let padding = 16 - (fragment.length % 16)
     fragment = Buffer.concat([fragment, Buffer.alloc(padding, padding - 1)])
+  } else {
+    fragment = Buffer.concat([fragment, Buffer.alloc(16, 15)])
   }
 
   let cipher = crypto.createCipheriv('aes-128-cbc', key, iv)
   cipher.setAutoPadding(false)
   return Buffer.concat([iv, cipher.update(fragment), cipher.final()])
+}
+
+const Decipher = (encrypted, macKey, key, sn) => {
+  let iv = encrypted.slice(0, 16)
+  encrypted = encrypted.slice(16)
+
+  let decipher = crypto.createDecipheriv('aes-128-cbc', key, iv)
+  decipher.setAutoPadding(false)
+  let decrypted = Buffer.concat([decipher.update(encrypted), decipher.final()])
+
+  // unpad
+  let padVal = decrypted[decrypted.length - 1]
+  let padNum = padVal + 1
+  if (decrypted.length < padNum) throw new Error('invalid padding')
+  
+  for (let i = decrypted.length - padNum; i < decrypted.length; i++) {
+    if (decrypted[i] !== padVal) throw new Error('invalid padding')
+  }
+
+  decrypted = decrypted.slice(0, decrypted.length - padNum)
+
+  // mac length is 20
+  let smac = decrypted.slice(decrypted.length - 20)
+  decrypted = decrypted.slice(0, decrypted.length - 20)
+
+  let cmac = crypto.createHmac('sha1', macKey)
+    .update(Buffer.concat([
+      sn,
+      Buffer.from([0x16, 0x03, 0x03, decrypted.length >> 8, decrypted.length]),
+      decrypted
+    ]))
+    .digest()
+
+  if (!smac.equals(cmac)) throw new Error('mac mismatch')
+
+  return decrypted 
+}
+
+const handleServerFinished = (msg, masterSecret, tbs) => {
+  if (msg.length < 4) throw new Error('invalid message length')
+  if (msg[0] !== 20) throw new Error('not a finished message')
+
+  let length = msg.readUInt32BE(0) & 0x00ffffff  
+  let body = msg.slice(4)
+  if (length !== body.length) throw new Error('invalid message body length')
+  if (length !== 12) throw new Error('verify data length mismatch')
+
+  let verifyData = PRF(
+    masterSecret, 
+    'server finished',
+    crypto.createHash('sha256').update(tbs).digest(),
+    12, 'sha256')
+
+  if (!verifyData.equals(body)) throw new Error('verify data mismatch')
 }
 
 module.exports = {
@@ -272,6 +344,8 @@ module.exports = {
   ClientFinished,
   deriveKeys,
   Cipher,
+  Decipher,
+  handleServerFinished
 }
 
 
