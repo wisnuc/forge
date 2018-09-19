@@ -62,7 +62,6 @@ let ServerWriteMacKey
 let ClientWriteKey
 let ServerWriteKey
 
-
 let IncomingData = Buffer.alloc(0)
 
 const TLSRecord = (type, packet) => Buffer.concat([
@@ -112,7 +111,6 @@ client.on('data', data => {
       }
 
       case 22: { // handshake
-
         if (Encryption) {
           let msg = Decipher(fragment, ServerWriteMacKey, ServerWriteKey, ServerSeqNum)
           let digest = crypto.createHash('sha256')
@@ -120,7 +118,7 @@ client.on('data', data => {
             .digest()
 
           handleServerFinished(msg, MasterSecret, digest)
-          console.log('handshake finished')
+          console.log('connected')
           return
         }
 
@@ -139,7 +137,6 @@ client.on('data', data => {
           if (bufferedTypes.includes(type)) HandshakeMessages.push(message) 
 
           switch (type) {
-
             case 2: { // server hello
               console.log('-- handle server hello')
               let r = handleServerHello(message.slice(4))
