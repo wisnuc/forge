@@ -179,6 +179,7 @@ const ClientCertificate = () => {
 }
 
 const ClientKeyExchange = (publicKey, preMasterSecret) => {
+
 /**
     preMasterSecret = Buffer.alloc(48)
     crypto.randomFillSync(preMasterSecret, 48)
@@ -213,11 +214,9 @@ const ChangeCipherSpecMessage = () =>
 
 const deriveKeys = (preMasterSecret, clientRandom, serverRandom) => {
   let random
-
   // when generating master secret, client random first
   random = Buffer.concat([clientRandom, serverRandom])
   masterSecret = PRF(preMasterSecret, 'master secret', random, 48, 'sha256')
-
   // when extracting keys, server random first
   random = Buffer.concat([serverRandom, clientRandom])
   let keys = PRF(masterSecret, 'key expansion', random, 2 * (20 + 16), 'sha256')
@@ -232,7 +231,9 @@ const deriveKeys = (preMasterSecret, clientRandom, serverRandom) => {
 }
 
 const ClientFinished = (masterSecret, handshakeMessages) => {
-  let verifyData = PRF( masterSecret, 'client finished',
+  let verifyData = PRF(
+    masterSecret, 
+    'client finished',
     crypto.createHash('sha256').update(handshakeMessages).digest(),
     12, 'sha256')
   
