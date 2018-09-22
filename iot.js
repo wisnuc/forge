@@ -28,23 +28,6 @@ const {
        finished(20)
        (255)
    } HandshakeType;
-
-   struct {
-       HandshakeType msg_type;
-       uint24 length;
-       select (HandshakeType) {
-           case hello_request:       HelloRequest;
-           case client_hello:        ClientHello;
-           case server_hello:        ServerHello;
-           case certificate:         Certificate;
-           case server_key_exchange: ServerKeyExchange;
-           case certificate_request: CertificateRequest;
-           case server_hello_done:   ServerHelloDone;
-           case certificate_verify:  CertificateVerify;
-           case client_key_exchange: ClientKeyExchange;
-           case finished:            Finished;
-       } body;
-   } Handshake;
 */
 
 let HandshakeMessages = []
